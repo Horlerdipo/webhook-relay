@@ -13,21 +13,21 @@ import (
 const RoutesKey = "routes:all"
 const RouteKey = "routes:"
 const DestinationsKey = "destinations:all"
-const DestinationKey = "destinations"
+const DestinationKey = "destinations:"
 
 type Store interface {
 	Name() string
 	Ping(ctx context.Context) error
-	AddRoute(ctx context.Context, route models.Route) error
+	AddRoute(ctx context.Context, route models.Route) (string, error)
 	CheckRouteExistence(ctx context.Context, routeId string) (bool, error)
 	FetchRoutes(ctx context.Context, withDestination bool) ([]models.Route, error)
 	FetchRoute(ctx context.Context, routeId string, withDestination bool) (models.Route, error)
 	RemoveRoute(ctx context.Context, routeId string) error
-	AddDestination(ctx context.Context, routeId string, destination models.Destination) error
+	AddDestination(ctx context.Context, routeId string, destination models.Destination) (string, error)
 	CheckDestinationExistence(ctx context.Context, routeId string, destinationId string) (bool, error)
 	FetchDestinations(ctx context.Context, routeId string) ([]models.Destination, error)
 	FetchDestination(ctx context.Context, routeId string, destinationId string) (models.Destination, error)
-	RemoveDestination(ctx context.Context, destinationId string) error
+	RemoveDestination(ctx context.Context, routeId, destinationId string) error
 }
 
 type RedisStore struct {
@@ -164,7 +164,7 @@ func (rs *RedisStore) AddDestination(ctx context.Context, routeId string, destin
 	destinationKey := fmt.Sprintf("%s%s", DestinationKey, destination.Identifier)
 
 	//add destination ID to Set
-	res, err := rs.sAdd(ctx, destinationKey, destination.Identifier)
+	res, err := rs.sAdd(ctx, destinationsKey, destination.Identifier)
 	if err != nil {
 		return "", err
 	}
@@ -198,7 +198,7 @@ func (rs *RedisStore) CheckDestinationExistence(ctx context.Context, routeId str
 	}
 
 	//check if destination details is also stored
-	details, err := rs.hGetAll(ctx, fmt.Sprintf("%s:%s:%s", DestinationKey, routeId, destinationId))
+	details, err := rs.hGetAll(ctx, fmt.Sprintf("%s%s", DestinationKey, destinationId))
 	if err != nil {
 		return false, err
 	}
@@ -230,7 +230,7 @@ func (rs *RedisStore) FetchDestinations(ctx context.Context, routeId string) ([]
 
 func (rs *RedisStore) FetchDestination(ctx context.Context, routeId string, destinationId string) (models.Destination, error) {
 
-	routeDetails, err := rs.hGetAll(ctx, fmt.Sprintf("%s:%s:%s", DestinationKey, routeId, destinationId))
+	routeDetails, err := rs.hGetAll(ctx, fmt.Sprintf("%s%s", DestinationKey, destinationId))
 	if err != nil {
 		return models.Destination{}, err
 	}
@@ -244,8 +244,8 @@ func (rs *RedisStore) FetchDestination(ctx context.Context, routeId string, dest
 	return destinationModel, nil
 }
 
-func (rs *RedisStore) RemoveDestination(ctx context.Context, destinationId string) error {
-	destinationsKey := fmt.Sprintf("%s:%s", DestinationsKey, destinationId)
+func (rs *RedisStore) RemoveDestination(ctx context.Context, routeId, destinationId string) error {
+	destinationsKey := fmt.Sprintf("%s:%s", DestinationsKey, routeId)
 	destinationKey := fmt.Sprintf("%s%s", DestinationKey, destinationId)
 
 	//remove destination id from set
