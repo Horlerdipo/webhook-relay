@@ -2,8 +2,10 @@ package datastore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/google/uuid"
 	"github.com/horlerdipo/webhook-relay/internal/enums"
 	"github.com/horlerdipo/webhook-relay/internal/models"
 	"github.com/redis/go-redis/v9"
@@ -14,9 +16,12 @@ const RoutesKey = "routes:all"
 const RouteKey = "routes:"
 const DestinationsKey = "destinations:all"
 const DestinationKey = "destinations:"
-const IncomingWebhookEventsKey = "webhook-events:all"
+const IncomingWebhookEventsKey = "webhook-events:incoming"
 const WebhookEventsKey = "webhook-events:all"
 const WebhookEventKey = "webhook-event:"
+const DeliveryAttemptKey = "delivery-attempt:"
+const DeliveryAttemptsQueueKey = "delivery-attempts-queue"
+const DeliveryAttemptsStreamLastEntryKey = "delivery-attempts-queue-last-id"
 
 type Store interface {
 	Name() string
@@ -31,7 +36,11 @@ type Store interface {
 	FetchDestinations(ctx context.Context, routeId string) ([]models.Destination, error)
 	FetchDestination(ctx context.Context, routeId string, destinationId string) (models.Destination, error)
 	RemoveDestination(ctx context.Context, routeId, destinationId string) error
-	StashIncomingWebhookEvent(ctx context.Context, routeId string, webhook models.WebhookEvent) (string, error)
+	StashIncomingWebhookEvent(ctx context.Context, webhook models.WebhookEvent) (string, error)
+	FetchIncomingWebhookEvents(ctx context.Context, chunk int) ([]models.WebhookEvent, error)
+	AddWebhookEvents(ctx context.Context, webhookIdentifiers []string) error
+	UpdateWebhookEventItem(ctx context.Context, webhookIdentifier string, item string, value string) error
+	QueueDeliveryAttempts(ctx context.Context, webhook models.WebhookEvent, destinations []models.Destination) error
 }
 
 type RedisStore struct {
@@ -271,7 +280,7 @@ func (rs *RedisStore) RemoveDestination(ctx context.Context, routeId, destinatio
 	return nil
 }
 
-func (rs *RedisStore) StashIncomingWebhookEvent(ctx context.Context, routeId string, webhook models.WebhookEvent) (string, error) {
+func (rs *RedisStore) StashIncomingWebhookEvent(ctx context.Context, webhook models.WebhookEvent) (string, error) {
 	webhooksKey := fmt.Sprintf("%s", IncomingWebhookEventsKey)
 	webhookKey := fmt.Sprintf("%s%s", WebhookEventKey, webhook.Identifier)
 
@@ -291,6 +300,105 @@ func (rs *RedisStore) StashIncomingWebhookEvent(ctx context.Context, routeId str
 		return "", errors.New(fmt.Sprintf("Unable to add webhook details for %s, please try again", webhook.Identifier))
 	}
 	return webhook.Identifier, nil
+}
+
+func (rs *RedisStore) FetchIncomingWebhookEvents(ctx context.Context, chunk int) ([]models.WebhookEvent, error) {
+	webhooks, err := rs.rPop(ctx, IncomingWebhookEventsKey, chunk)
+	if err != nil {
+		return nil, err
+	}
+
+	var webhookEvents []models.WebhookEvent
+
+	for _, webhook := range webhooks {
+		webhookDetails, err := rs.hGetAll(ctx, fmt.Sprintf("%s%s", WebhookEventKey, webhook))
+		if err != nil {
+			//todo: add slog or some logger and log this kinda errors
+			continue
+		}
+
+		value := webhookDetails["received_at"][:19] // "YYYY-MM-DD HH:MM:SS"
+		layout := "2006-01-02 15:04:05"
+		receivedAt, _ := time.Parse(layout, value)
+
+		status, err := enums.ParseWebhookEventStatus(webhookDetails["status"])
+		if err != nil {
+			//todo: log something you ass
+			continue
+		}
+
+		webhookModel := models.WebhookEvent{
+			RouteIdentifier: webhookDetails["route_identifier"],
+			Identifier:      webhookDetails["identifier"],
+			ReceivedAt:      receivedAt,
+			Payload:         json.RawMessage(webhookDetails["payload"]),
+			Headers:         json.RawMessage(webhookDetails["headers"]),
+			Status:          status,
+		}
+		webhookEvents = append(webhookEvents, webhookModel)
+	}
+
+	return webhookEvents, nil
+}
+
+func (rs *RedisStore) AddWebhookEvents(ctx context.Context, webhookIdentifiers []string) error {
+	//add webhook ID to Set
+	_, err := rs.sAdd(ctx, WebhookEventsKey, webhookIdentifiers)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (rs *RedisStore) UpdateWebhookEventItem(ctx context.Context, webhookIdentifier string, item string, value string) error {
+	//check if webhook exists
+	exists, err := rs.client.Exists(ctx, fmt.Sprintf("%s%s", WebhookEventKey, webhookIdentifier)).Result()
+	if err != nil {
+		return err
+	}
+
+	if exists == 0 {
+		return errors.New(fmt.Sprintf("Webhook event %s does not exist", webhookIdentifier))
+	}
+
+	//set value
+	err = rs.client.HSet(ctx, fmt.Sprintf("%s%s", WebhookEventKey, webhookIdentifier), item, value).Err()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (rs *RedisStore) QueueDeliveryAttempts(ctx context.Context, webhook models.WebhookEvent, destinations []models.Destination) error {
+	for _, destination := range destinations {
+		id := uuid.NewString()
+		_, err := rs.hSet(ctx, fmt.Sprintf("%s%s", DeliveryAttemptKey, id), models.DeliveryAttempt{
+			Identifier:             id,
+			WebhookEventIdentifier: webhook.Identifier,
+			DestinationIdentifier:  destination.Identifier,
+			LastAttemptedAt:        time.Now(),
+			Tries:                  0,
+			Status:                 enums.Queued,
+		})
+		if err != nil {
+			//todo: log error
+			continue
+		}
+
+		lastId, err := rs.client.XAdd(ctx, &redis.XAddArgs{
+			Stream: DeliveryAttemptsQueueKey,
+		}).Result()
+		if err != nil {
+			continue
+		}
+
+		_, err = rs.set(ctx, DeliveryAttemptsStreamLastEntryKey, lastId, 0)
+		if err != nil {
+			continue
+		}
+	}
+	return nil
 }
 
 func (rs *RedisStore) get(ctx context.Context, key string) (string, error) {
@@ -359,6 +467,22 @@ func (rs *RedisStore) hGetAll(ctx context.Context, key string) (map[string]strin
 
 func (rs *RedisStore) hDel(ctx context.Context, key string, fields []string) error {
 	return rs.client.HDel(ctx, key, fields...).Err()
+}
+
+func (rs *RedisStore) rPop(ctx context.Context, key string, count int) ([]string, error) {
+	val, err := rs.client.RPopCount(ctx, key, count).Result()
+	if err != nil {
+		return nil, err
+	}
+	return val, nil
+}
+
+func (rs *RedisStore) lPush(ctx context.Context, key string, value any) (int, error) {
+	val, err := rs.client.LPush(ctx, key, value).Result()
+	if err != nil {
+		return 0, err
+	}
+	return int(val), nil
 }
 
 func NewRedisStore(client *redis.Client) *RedisStore {

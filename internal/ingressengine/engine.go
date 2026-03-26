@@ -15,9 +15,9 @@ import (
 
 type IngressEngine interface {
 	RegisterIncomingWebhookEvent(ctx context.Context, routeId string, webhook models.WebhookEvent) error
-	ProcessStashedWebhookEvents(ctx context.Context, routeId string, webhooks []models.WebhookEvent) error
+	ProcessStashedWebhookEvents(ctx context.Context) error
 	validateWebhookEventCredentials(ctx context.Context, routeId string, webhook models.WebhookEvent) error
-	queueDeliveryAttempts(ctx context.Context, routeId string, webhook models.WebhookEvent) error
+	queueDeliveryAttempts(ctx context.Context, webhook models.WebhookEvent) error
 }
 
 type DefaultIngressEngine struct {
@@ -35,25 +35,79 @@ func (ie *DefaultIngressEngine) RegisterIncomingWebhookEvent(ctx context.Context
 		return errors.New("route does not exist")
 	}
 
-	_, err = ie.Datastore.StashIncomingWebhookEvent(ctx, routeId, webhook)
+	_, err = ie.Datastore.StashIncomingWebhookEvent(ctx, webhook)
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
-func (ie *DefaultIngressEngine) ProcessStashedWebhookEvents(ctx context.Context, routeId string, webhooks []models.WebhookEvent) error {
+func (ie *DefaultIngressEngine) ProcessStashedWebhookEvents(ctx context.Context) error {
+
 	//fetch webhook identifier chunk from webhook:incoming list
+	webhooks, err := ie.Datastore.FetchIncomingWebhookEvents(ctx, 100)
+	if err != nil {
+		return err
+	}
+
 	//process each chunk
-	//On Each chunk:
-	//check if it has hash, if no has remove from list
-	//validate webhook event credentials
-	//if false, push to webhook:all and update status to validation_failed
-	//if true, fetch destinations, XADD to stream, update status to attempted(this is queueDeliveryAttempts)
+	var webhookIdentifiers []string
+	for _, webhook := range webhooks {
+		//validate webhook event credentials
+		err = ie.validateWebhookEventCredentials(ctx, webhook.Identifier, webhook)
+		if err != nil {
+			//if false, push to webhook:all and update status to validation_failed
+			webhookIdentifiers = append(webhookIdentifiers, webhook.Identifier)
+			err := ie.Datastore.UpdateWebhookEventItem(ctx, webhook.Identifier, "status", string(enums.ValidationFailed))
+			if err != nil {
+				//todo: log error
+				continue
+			}
+
+			//todo: log error
+			continue
+		}
+
+		//if true, queueDeliveryAttempts
+		err = ie.queueDeliveryAttempts(ctx, webhook)
+		if err != nil {
+			//todo: log error
+			continue
+		}
+	}
+
+	err = ie.Datastore.AddWebhookEvents(ctx, webhookIdentifiers)
+	if err != nil {
+		//todo: log error
+		return err
+	}
+
+	return nil
+}
+
+func (ie *DefaultIngressEngine) queueDeliveryAttempts(ctx context.Context, webhook models.WebhookEvent) error {
+	//fetch destinations, XADD to stream, update status to attempted
+	destinations, err := ie.Datastore.FetchDestinations(ctx, webhook.RouteIdentifier)
+	if err != nil {
+		//todo: log error
+		return err
+	}
+
+	err = ie.Datastore.QueueDeliveryAttempts(ctx, webhook, destinations)
+	if err != nil {
+		//todo: log error
+		return err
+	}
+
 	return nil
 }
 
 func (ie *DefaultIngressEngine) validateWebhookEventCredentials(ctx context.Context, routeId string, webhook models.WebhookEvent) error {
+	//check if webhook event has not been attempted already
+	if webhook.Status != enums.Pending {
+		return errors.New("webhook status must be pending")
+	}
+
 	// check if route exist and is active
 	routeExists, err := ie.Datastore.CheckRouteExistence(ctx, routeId)
 	if err != nil {
