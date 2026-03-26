@@ -14,6 +14,9 @@ const RoutesKey = "routes:all"
 const RouteKey = "routes:"
 const DestinationsKey = "destinations:all"
 const DestinationKey = "destinations:"
+const IncomingWebhookEventsKey = "webhook-events:all"
+const WebhookEventsKey = "webhook-events:all"
+const WebhookEventKey = "webhook-event:"
 
 type Store interface {
 	Name() string
@@ -28,6 +31,7 @@ type Store interface {
 	FetchDestinations(ctx context.Context, routeId string) ([]models.Destination, error)
 	FetchDestination(ctx context.Context, routeId string, destinationId string) (models.Destination, error)
 	RemoveDestination(ctx context.Context, routeId, destinationId string) error
+	StashIncomingWebhookEvent(ctx context.Context, routeId string, webhook models.WebhookEvent) (string, error)
 }
 
 type RedisStore struct {
@@ -265,6 +269,28 @@ func (rs *RedisStore) RemoveDestination(ctx context.Context, routeId, destinatio
 		return err
 	}
 	return nil
+}
+
+func (rs *RedisStore) StashIncomingWebhookEvent(ctx context.Context, routeId string, webhook models.WebhookEvent) (string, error) {
+	webhooksKey := fmt.Sprintf("%s", IncomingWebhookEventsKey)
+	webhookKey := fmt.Sprintf("%s%s", WebhookEventKey, webhook.Identifier)
+
+	//add webhook ID to Set
+	err := rs.client.LPush(ctx, webhooksKey, webhook.Identifier).Err()
+	if err != nil {
+		return "", err
+	}
+
+	//add webhook details to Hash
+	res, err := rs.hSet(ctx, webhookKey, webhook)
+	if err != nil {
+		return "", err
+	}
+
+	if res == 0 {
+		return "", errors.New(fmt.Sprintf("Unable to add webhook details for %s, please try again", webhook.Identifier))
+	}
+	return webhook.Identifier, nil
 }
 
 func (rs *RedisStore) get(ctx context.Context, key string) (string, error) {
