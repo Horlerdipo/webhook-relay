@@ -3,64 +3,21 @@ package routeregistrar
 import (
 	"context"
 	"fmt"
-	"github.com/alicebob/miniredis/v2"
 	"github.com/google/uuid"
 	"github.com/horlerdipo/webhook-relay/internal/datastore"
 	"github.com/horlerdipo/webhook-relay/internal/enums"
 	"github.com/horlerdipo/webhook-relay/internal/models"
-	"github.com/redis/go-redis/v9"
+	"github.com/horlerdipo/webhook-relay/internal/testutils"
 	"math/rand"
 	"testing"
 )
 
-func newRouteModel() models.Route {
-	routeUuid := uuid.NewString()
-	return models.Route{
-		HttpMethod:              enums.Post,
-		Name:                    routeUuid,
-		Identifier:              routeUuid,
-		VerificationType:        enums.None,
-		VerificationKeyLocation: enums.NoLocation,
-		VerificationKeyName:     "none",
-		VerificationToken:       routeUuid,
-		Active:                  true,
-		Destinations:            nil,
-	}
-}
-
-func newDestinationModel(routeId string) models.Destination {
-	destinationUuid := uuid.NewString()
-	return models.Destination{
-		HttpMethod:        enums.Post,
-		Identifier:        destinationUuid,
-		Active:            true,
-		Url:               "https://google.com",
-		VerificationToken: destinationUuid,
-		RouteIdentifier:   routeId,
-	}
-}
-
-func newTestRedisStore(t *testing.T) (*datastore.RedisStore, *miniredis.Miniredis, func()) {
-	t.Helper()
-	srv := miniredis.RunT(t)
-
-	opt := &redis.Options{Addr: srv.Addr()}
-	client := redis.NewClient(opt)
-	rs := datastore.NewRedisStore(client)
-
-	cleanup := func() {
-		client.Close()
-		srv.Close()
-	}
-	return rs, srv, cleanup
-}
-
 func TestDefaultRouteRegistrar_AddRoute(t *testing.T) {
-	redisStore, redisInstance, cleanup := newTestRedisStore(t)
+	redisStore, redisInstance, cleanup := testutils.NewTestRedisStore(t)
 	defer cleanup()
 	ctx := context.Background()
 	registrar := NewDefaultRouteRegistrar(redisStore)
-	route := newRouteModel()
+	route := testutils.NewRouteModel()
 	routeId, err := registrar.AddRoute(ctx, route)
 
 	if err != nil {
@@ -109,12 +66,12 @@ func TestDefaultRouteRegistrar_AddRoute(t *testing.T) {
 }
 
 func TestDefaultRouteRegistrar_RemoveRoute(t *testing.T) {
-	redisStore, redisInstance, cleanup := newTestRedisStore(t)
+	redisStore, redisInstance, cleanup := testutils.NewTestRedisStore(t)
 	defer cleanup()
 
 	ctx := context.Background()
 	registrar := NewDefaultRouteRegistrar(redisStore)
-	route := newRouteModel()
+	route := testutils.NewRouteModel()
 	_, err := redisStore.AddRoute(ctx, route)
 	if err != nil {
 		return
@@ -149,7 +106,7 @@ func TestDefaultRouteRegistrar_RemoveRoute(t *testing.T) {
 }
 
 func TestDefaultRouteRegistrar_FetchRoutes(t *testing.T) {
-	redisStore, _, cleanup := newTestRedisStore(t)
+	redisStore, _, cleanup := testutils.NewTestRedisStore(t)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -158,7 +115,7 @@ func TestDefaultRouteRegistrar_FetchRoutes(t *testing.T) {
 	randomNumber := rand.Intn(10)
 	var routes []models.Route
 	for i := 1; i <= randomNumber; i++ {
-		route := newRouteModel()
+		route := testutils.NewRouteModel()
 		_, err := redisStore.AddRoute(ctx, route)
 		if err != nil {
 			t.Fatalf("AddRoute() error = %v", err)
@@ -190,12 +147,12 @@ func TestDefaultRouteRegistrar_FetchRoutes(t *testing.T) {
 }
 
 func TestDefaultRouteRegistrar_FetchRoute(t *testing.T) {
-	redisStore, _, cleanup := newTestRedisStore(t)
+	redisStore, _, cleanup := testutils.NewTestRedisStore(t)
 	defer cleanup()
 
 	ctx := context.Background()
 	registrar := NewDefaultRouteRegistrar(redisStore)
-	route := newRouteModel()
+	route := testutils.NewRouteModel()
 
 	_, err := redisStore.AddRoute(ctx, route)
 	if err != nil {
@@ -229,19 +186,19 @@ func TestDefaultRouteRegistrar_FetchRoute(t *testing.T) {
 }
 
 func TestDefaultRouteRegistrar_AddDestination(t *testing.T) {
-	redisStore, _, cleanup := newTestRedisStore(t)
+	redisStore, _, cleanup := testutils.NewTestRedisStore(t)
 	defer cleanup()
 
 	ctx := context.Background()
 	registrar := NewDefaultRouteRegistrar(redisStore)
-	route := newRouteModel()
+	route := testutils.NewRouteModel()
 
 	_, err := redisStore.AddRoute(ctx, route)
 	if err != nil {
 		t.Fatalf("AddRoute() error = %v", err)
 	}
 
-	destination := newDestinationModel(route.Identifier)
+	destination := testutils.NewDestinationModel(route.Identifier)
 	destinationId, err := registrar.AddDestination(ctx, route.Identifier, destination)
 	if err != nil {
 		t.Fatalf("AddDestination() error = %v", err)
@@ -274,18 +231,18 @@ func TestDefaultRouteRegistrar_AddDestination(t *testing.T) {
 }
 
 func TestDefaultRouteRegistrar_RemoveDestination(t *testing.T) {
-	redisStore, redisInstance, cleanup := newTestRedisStore(t)
+	redisStore, redisInstance, cleanup := testutils.NewTestRedisStore(t)
 	defer cleanup()
 
 	ctx := context.Background()
 	registrar := NewDefaultRouteRegistrar(redisStore)
-	route := newRouteModel()
+	route := testutils.NewRouteModel()
 	_, err := redisStore.AddRoute(ctx, route)
 	if err != nil {
 		t.Fatalf("AddRoute() error = %v", err)
 	}
 
-	destination := newDestinationModel(route.Identifier)
+	destination := testutils.NewDestinationModel(route.Identifier)
 
 	destinationsKey := fmt.Sprintf("%s:%s", datastore.DestinationsKey, route.Identifier)
 	destinationKey := fmt.Sprintf("%s%s", datastore.DestinationKey, destination.Identifier)
@@ -324,13 +281,13 @@ func TestDefaultRouteRegistrar_RemoveDestination(t *testing.T) {
 }
 
 func TestDefaultRouteRegistrar_FetchRouteDestinations(t *testing.T) {
-	redisStore, _, cleanup := newTestRedisStore(t)
+	redisStore, _, cleanup := testutils.NewTestRedisStore(t)
 	defer cleanup()
 
 	ctx := context.Background()
 	registrar := NewDefaultRouteRegistrar(redisStore)
 
-	route := newRouteModel()
+	route := testutils.NewRouteModel()
 	_, err := registrar.AddRoute(ctx, route)
 	if err != nil {
 		t.Fatalf("AddRoute() error = %v", err)
@@ -339,7 +296,7 @@ func TestDefaultRouteRegistrar_FetchRouteDestinations(t *testing.T) {
 	randomNumber := rand.Intn(10)
 	var destinations []models.Destination
 	for i := 1; i <= randomNumber; i++ {
-		destination := newDestinationModel(route.Identifier)
+		destination := testutils.NewDestinationModel(route.Identifier)
 		_, err := redisStore.AddDestination(ctx, route.Identifier, destination)
 		if err != nil {
 			t.Fatalf("AddDestination() error = %v", err)
@@ -373,19 +330,19 @@ func TestDefaultRouteRegistrar_FetchRouteDestinations(t *testing.T) {
 }
 
 func TestDefaultRouteRegistrar_FetchDestinationDetails(t *testing.T) {
-	redisStore, _, cleanup := newTestRedisStore(t)
+	redisStore, _, cleanup := testutils.NewTestRedisStore(t)
 	defer cleanup()
 
 	ctx := context.Background()
 	registrar := NewDefaultRouteRegistrar(redisStore)
-	route := newRouteModel()
+	route := testutils.NewRouteModel()
 
 	_, err := redisStore.AddRoute(ctx, route)
 	if err != nil {
 		t.Fatalf("AddRoute() error = %v", err)
 	}
 
-	destination := newDestinationModel(route.Identifier)
+	destination := testutils.NewDestinationModel(route.Identifier)
 	_, err = redisStore.AddDestination(ctx, route.Identifier, destination)
 	if err != nil {
 		t.Fatalf("AddDestination() error = %v", err)
