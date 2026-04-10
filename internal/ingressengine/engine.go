@@ -7,11 +7,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"github.com/horlerdipo/webhook-relay/internal/datastore"
 	"github.com/horlerdipo/webhook-relay/internal/enums"
 	"github.com/horlerdipo/webhook-relay/internal/models"
 )
+
+const IncomingWebhookEventChunkSize = 100
 
 type IngressEngine interface {
 	RegisterIncomingWebhookEvent(ctx context.Context, routeId string, webhook models.WebhookEvent) error
@@ -45,7 +46,7 @@ func (ie *DefaultIngressEngine) RegisterIncomingWebhookEvent(ctx context.Context
 func (ie *DefaultIngressEngine) ProcessStashedWebhookEvents(ctx context.Context) error {
 
 	//fetch webhook identifier chunk from webhook:incoming list
-	webhooks, err := ie.Datastore.FetchIncomingWebhookEvents(ctx, 100)
+	webhooks, err := ie.Datastore.FetchIncomingWebhookEvents(ctx, IncomingWebhookEventChunkSize)
 	if err != nil {
 		return err
 	}
@@ -63,7 +64,6 @@ func (ie *DefaultIngressEngine) ProcessStashedWebhookEvents(ctx context.Context)
 				//todo: log error
 				continue
 			}
-
 			//todo: log error
 			continue
 		}
@@ -166,31 +166,65 @@ func (ie *DefaultIngressEngine) verifyStaticToken(route *models.Route, webhook *
 }
 
 func (ie *DefaultIngressEngine) verifyRequestSigningToken(route *models.Route, webhook *models.WebhookEvent) error {
-	var payload json.RawMessage
-	var decodedPayload map[string]interface{}
+	// For header-located signature: signature is in headers, message to sign is the body (webhook.Payload)
+	// For body-located signature: signature is in the body under VerificationKeyName; the message to sign is the body with that key removed.
+	var sentHMAC string
+	var message []byte
 
-	if route.VerificationKeyLocation == enums.Body {
-		payload = webhook.Payload
+	if route.VerificationKeyLocation == enums.Header {
+		// headers expected to contain the signature
+		var headers map[string]string
+		if len(webhook.Headers) == 0 {
+			return errors.New("unable to verify webhook signing token")
+		}
+		if err := json.Unmarshal(webhook.Headers, &headers); err != nil {
+			return err
+		}
+		val, ok := headers[route.VerificationKeyName]
+		if !ok {
+			return errors.New("unable to verify webhook signing token")
+		}
+		sentHMAC = val
+		message = webhook.Payload
 	} else {
-		payload = webhook.Headers
-	}
 
-	err := json.Unmarshal(payload, &decodedPayload)
-	if err != nil {
-		return err
-	}
+		var body map[string]interface{}
+		if len(webhook.Payload) == 0 {
+			return errors.New("unable to verify webhook signing token")
+		}
+		if err := json.Unmarshal(webhook.Payload, &body); err != nil {
+			return err
+		}
+		val, ok := body[route.VerificationKeyName]
+		if !ok {
+			return errors.New("unable to verify webhook signing token")
+		}
+		sentHMAC, ok = val.(string)
+		if !ok {
+			return errors.New("unable to verify webhook signing token")
+		}
 
-	sentHMAC := decodedPayload[route.VerificationKeyName].(string)
+		// remove the signature field and marshal the rest as the message
+		delete(body, route.VerificationKeyName)
+		m, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		message = m
+	}
 
 	mac := hmac.New(sha256.New, []byte(route.VerificationToken))
-	mac.Write(payload)
+	mac.Write(message)
 	expectedMAC := hex.EncodeToString(mac.Sum(nil))
 
-	fmt.Printf("Generated HMAC: %x\n", expectedMAC)
-
-	// Verify the HMAC
 	if sentHMAC != expectedMAC {
 		return errors.New("unable to verify webhook signing token")
 	}
 	return nil
+}
+
+func NewDefaultIngressEngine(datastore datastore.Store) *DefaultIngressEngine {
+	return &DefaultIngressEngine{
+		Datastore: datastore,
+	}
 }

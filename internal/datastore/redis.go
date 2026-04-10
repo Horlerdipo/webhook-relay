@@ -161,7 +161,7 @@ func (rs *RedisStore) FetchRoute(ctx context.Context, routeId string, withDestin
 	routeModel.VerificationKeyLocation, _ = enums.ParseVerificationKeyLocation(routeDetails["verification_key_location"])
 	routeModel.VerificationToken = routeDetails["verification_token"]
 	routeModel.VerificationKeyName = routeDetails["verification_key_name"]
-	routeModel.Active = routeDetails["active"] == "true"
+	routeModel.Active = routeDetails["active"] == "true" || routeDetails["active"] == "1"
 
 	if withDestinations {
 		destinations, err := rs.FetchDestinations(ctx, routeId)
@@ -281,7 +281,7 @@ func (rs *RedisStore) RemoveDestination(ctx context.Context, routeId, destinatio
 }
 
 func (rs *RedisStore) StashIncomingWebhookEvent(ctx context.Context, webhook models.WebhookEvent) (string, error) {
-	webhooksKey := fmt.Sprintf("%s", IncomingWebhookEventsKey)
+	webhooksKey := IncomingWebhookEventsKey
 	webhookKey := fmt.Sprintf("%s%s", WebhookEventKey, webhook.Identifier)
 
 	//add webhook ID to Set
@@ -291,7 +291,7 @@ func (rs *RedisStore) StashIncomingWebhookEvent(ctx context.Context, webhook mod
 	}
 
 	//add webhook details to Hash
-	res, err := rs.hSet(ctx, webhookKey, webhook)
+	res, err := rs.hSet(ctx, webhookKey, webhook.ToRedisHash())
 	if err != nil {
 		return "", err
 	}

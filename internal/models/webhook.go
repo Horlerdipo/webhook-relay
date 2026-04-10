@@ -14,3 +14,14 @@ type WebhookEvent struct {
 	Headers         json.RawMessage          `json:"headers,omitempty" redis:"headers"`
 	Status          enums.WebhookEventStatus `json:"status,omitempty" redis:"status"`
 }
+
+func (w WebhookEvent) ToRedisHash() map[string]interface{} {
+	return map[string]interface{}{
+		"route_identifier": w.RouteIdentifier,
+		"identifier":       w.Identifier,
+		"received_at":      w.ReceivedAt.Format(time.RFC3339),
+		"payload":          []byte(w.Payload),
+		"headers":          []byte(w.Headers),
+		"status":           w.Status,
+	}
+}
